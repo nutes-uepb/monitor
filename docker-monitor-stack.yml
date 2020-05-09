@@ -1,0 +1,171 @@
+version: "3.7"
+
+services:
+  # Visualize metrics
+  grafana:
+    hostname: grafana
+    image: grafana/grafana:6.6.2
+    user: root
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 15s
+        max_attempts: 15
+      placement:
+        constraints:
+          - node.role == manager
+    environment:
+      - GF_SECURITY_ADMIN_USER=${ADMIN_USERNAME:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SMTP_ENABLED=${GF_SMTP_ENABLED:-false}
+      - GF_SMTP_HOST=${GF_SMTP_HOST:-smtp.gmail.com:465}
+      - GF_SMTP_USER=${GF_SMTP_USER:-grafana@test.com}
+      - GF_SMTP_PASSWORD=${GF_SMTP_PASSWORD:-secret}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - ${GF_PORT:-3000}:3000
+    configs:
+      - source: ocariot-prom-data-src-grafana-config
+        target: /etc/grafana/provisioning/datasources/prom_data_src.yaml
+        mode: 0400
+      - source: ocariot-dash-grafana-config
+        target: /etc/grafana/provisioning/dashboards/dash_config.yml
+        mode: 0400
+      - source: ocariot-nodes-dash-grafana-config
+        target: /etc/grafana/dashboards/nodes.json
+        mode: 0400
+      - source: ocariot-services-dash-grafana-config
+        target: /etc/grafana/dashboards/services.json
+        mode: 0400
+      - source: ocariot-prom-dash-grafana-config
+        target: /etc/grafana/dashboards/prometheus.json
+        mode: 0400
+    networks:
+      - ocariot
+    depends_on:
+      - prometheus
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+  # Metrics database
+  prometheus:
+    image: prom/prometheus:v2.16.0
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 15s
+        max_attempts: 15
+      placement:
+        constraints:
+          - node.role == manager
+    command:
+      - '--config.file=/etc/prometheus/config.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${DATA_RETENTION:-15d}'
+    volumes:
+      - prometheus-data:/prometheus
+    configs:
+      - source: ocariot-prometheus-config
+        target: /etc/prometheus/config.yml
+        mode: 0444
+    networks:
+      - ocariot
+    depends_on:
+      - node-exporter
+      - cadvisor
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+  # Containers metrics collector
+  cadvisor:
+    image: google/cadvisor:v0.33.0
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 15s
+        max_attempts: 15
+    command: -docker_only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - ocariot
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+  # Host metrics collector
+  node-exporter:
+    image: prom/node-exporter:v0.18.1
+    user: root
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 15s
+        max_attempts: 15
+    environment:
+      - NODE_ID={{.Node.ID}}
+    entrypoint: /etc/node-exporter/docker-entrypoint.sh
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.textfile.directory=/etc/node-exporter/'
+    volumes:
+      - /:/host:ro,rslave
+      - /etc/hostname:/etc/nodename:ro
+    configs:
+      - source: ocariot-init-node-exporter-config
+        target: /etc/node-exporter/docker-entrypoint.sh
+        mode: 0100
+    networks:
+      - ocariot
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+configs:
+  ocariot-prometheus-config:
+    file: config/prometheus/config.yml
+  ocariot-prom-data-src-grafana-config:
+    file: config/grafana/prom_data_src.yaml
+  ocariot-nodes-dash-grafana-config:
+    file: config/grafana/dashboards/nodes.json
+  ocariot-services-dash-grafana-config:
+    file: config/grafana/dashboards/services.json
+  ocariot-prom-dash-grafana-config:
+    file: config/grafana/dashboards/prometheus.json
+  ocariot-dash-grafana-config:
+    file: config/grafana/dashboards/dash_config.yml
+  ocariot-init-node-exporter-config:
+    file: config/node-exporter/docker-entrypoint.sh
+
+volumes:
+  grafana-data:
+    name: ocariot-monitor-grafana-data
+  prometheus-data:
+    name: ocariot-monitor-prometheus-data
+
+networks:
+  ocariot:
+    external: true
+    name: ocariot
+    driver: overlay
+    driver_opts:
+      encrypted: "true"
